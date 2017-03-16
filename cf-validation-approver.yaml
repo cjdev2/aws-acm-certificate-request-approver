@@ -1,0 +1,122 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: 'AWS::Serverless-2016-10-31'
+Description: ACM certificate request approver
+
+Parameters:
+  DomainName:
+    Description: The domain name to automatically approve certificates for
+    Type: String
+    MinLength: 1
+
+Resources:
+  # SES is not currently supported by CloudFormation, so we need to use a custom
+  # resource to manage SES resources, instead. This allows us to create an SES
+  # receipt rule below.
+  SESCustomResourceFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Runtime: nodejs4.3
+      Handler: ses-cloudformation.handler
+      Timeout: 30
+      Role: !GetAtt SESCustomResourceFunctionRole.Arn
+      CodeUri: ./lambda
+  SESCustomResourceFunctionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service: lambda.amazonaws.com
+          Action: 'sts:AssumeRole'
+      ManagedPolicyArns:
+      - 'arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole'
+      - 'arn:aws:iam::aws:policy/AmazonSESFullAccess'
+
+  # This function will actually handle emails delivered to SES asking for
+  # certificate ownership validation.
+  Function:
+    Type: AWS::Serverless::Function
+    Properties:
+      Runtime: nodejs4.3
+      Handler: index.handler
+      Timeout: 10
+      Role: !GetAtt FunctionRole.Arn
+      Environment:
+        Variables:
+          S3_BUCKET: !Ref EmailBucket
+      CodeUri: ./lambda
+
+  # Our function needs access to S3, since that’s where the emails are stored.
+  FunctionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service: lambda.amazonaws.com
+          Action: 'sts:AssumeRole'
+      ManagedPolicyArns: ['arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole']
+      Policies:
+      - PolicyName: access-to-email-bucket
+        PolicyDocument:
+          Statement:
+            Effect: Allow
+            Action: 's3:GetObject'
+            Resource: !Sub arn:aws:s3:::${EmailBucket}/*
+
+  # Additionally, SES needs permission to call our function.
+  FunctionSESPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !GetAtt Function.Arn
+      Principal: ses.amazonaws.com
+      SourceAccount: !Ref AWS::AccountId
+      Action: 'lambda:InvokeFunction'
+
+  # We need a bucket where SES will store inbound emails that our Lambda
+  # function can fetch and process.
+  EmailBucket:
+    Type: AWS::S3::Bucket
+
+  # The bucket must be accessible by SES.
+  EmailBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref EmailBucket
+      PolicyDocument:
+        Statement:
+          Effect: Allow
+          Principal:
+            Service: ses.amazonaws.com
+          Action: 's3:PutObject'
+          Resource: !Sub arn:aws:s3:::${EmailBucket}/*
+
+  # This custom resource creates an SES receipt rule to process inbound emails.
+  # It stores the email in an S3 bucket, then triggers our Lambda function.
+  ReceiptRule:
+    Type: Custom::ReceiptRule
+    DependsOn: FunctionSESPermission # necessary because SES complains if it can’t call the lambda on creation
+    Properties:
+      ServiceToken: !GetAtt SESCustomResourceFunction.Arn
+      RuleSetName: default-rule-set
+      Rule:
+        Recipients: [!Sub 'hostmaster@${DomainName}']
+        Actions:
+        - S3Action:
+            BucketName: !Ref EmailBucket
+        - LambdaAction:
+            FunctionArn: !GetAtt Function.Arn
+            InvocationType: Event
+
+  # Finally, we need to create an MX record for our hosted zone that will
+  # actually direct emails to SES’s SMTP servers.
+  MXRecord:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      HostedZoneName: !Sub ${DomainName}.
+      Name: !Ref DomainName
+      Type: MX
+      TTL: 300
+      ResourceRecords: [!Sub '10 inbound-smtp.${AWS::Region}.amazonaws.com']

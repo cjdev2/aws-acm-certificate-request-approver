@@ -1,0 +1,13 @@
+{
+  "name": "aws-acm-validation-approver",
+  "version": "0.0.0",
+  "main": "index.js",
+  "scripts": {},
+  "dependencies": {
+    "aws-sdk": "^2.27.0",
+    "bluebird": "^3.5.0",
+    "request": "^2.81.0",
+    "request-promise": "^4.1.1",
+    "shortid": "^2.2.8"
+  }
+}
