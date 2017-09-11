@@ -14,6 +14,13 @@ exports.handler = function (event, context, callback) {
     if (err) { return logCallback(err) }
 
     var body = result.Body.toString()
+
+    var accountId = context.invokedFunctionArn.match(/\d{3,}/)[0]
+    var requesterAccountId = body.match(/AWS account ID: ([-0-9]+)/)[1].replace(/-/g, "");
+    if (accountId !== requesterAccountId) {
+      return logCallback('certificate requester account ID does not match requestee account ID')
+    }
+
     var values = body.match(/certificates\.amazon\.com\/approvals\?code=([-0-9a-f]+)&context=([-0-9a-f]+)/)
     if (!values) { return logCallback('message did not include certificate approval link') }
 
